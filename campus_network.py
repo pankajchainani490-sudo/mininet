@@ -1,0 +1,342 @@
+#!/usr/bin/env python
+"""
+校园网络模拟器 - Campus Network Simulator v2.0 (WSL兼容版)
+修复了WSL中接口名长度限制和变量定义问题
+"""
+from mininet.cli import CLI
+from mininet.log import setLogLevel, info
+from mininet.net import Mininet
+from mininet.node import Controller, Switch, RemoteController, OVSKernelSwitch
+from mininet.topo import Topo
+from mininet.util import quietRun
+
+import signal
+import sys
+
+# =============================================================================
+# 网络配置 - 缩短名称以满足WSL接口名限制(≤15字符)
+# =============================================================================
+
+VLAN_CONFIG = {
+    'mgmt':      {'id': 1,   'network': '10.0.1.0/24',   'gateway': '10.0.1.1'},
+    'dormA':     {'id': 10,  'network': '10.0.10.0/24', 'gateway': '10.0.10.1'},
+    'dormB':     {'id': 11,  'network': '10.0.11.0/24', 'gateway': '10.0.11.1'},
+    'dormC':     {'id': 12,  'network': '10.0.12.0/24', 'gateway': '10.0.12.1'},
+    'canteen':   {'id': 13,  'network': '10.0.13.0/24', 'gateway': '10.0.13.1'},
+    'office':    {'id': 20,  'network': '10.0.20.0/24', 'gateway': '10.0.20.1'},
+    'lab':       {'id': 21,  'network': '10.0.21.0/24', 'gateway': '10.0.21.1'},
+    'library':   {'id': 30,  'network': '10.0.30.0/24', 'gateway': '10.0.30.1'},
+    'academic':  {'id': 40,  'network': '10.0.40.0/24', 'gateway': '10.0.40.1'},
+    'hr':        {'id': 50,  'network': '10.0.50.0/24', 'gateway': '10.0.50.1', 'secure': True},
+    'finance':   {'id': 60,  'network': '10.0.60.0/24', 'gateway': '10.0.60.1', 'secure': True},
+    'logistics': {'id': 70,  'network': '10.0.70.0/24', 'gateway': '10.0.70.1'},
+    'wifiOfc':   {'id': 80,  'network': '10.0.80.0/24', 'gateway': '10.0.80.1'},
+    'wifiGst':   {'id': 90,  'network': '10.0.90.0/24', 'gateway': '10.0.90.1'},
+    'server':    {'id': 100, 'network': '10.0.100.0/24', 'gateway': '10.0.100.1'},
+    'dmz':       {'id': 110, 'network': '10.0.110.0/24', 'gateway': '10.0.110.1'},
+}
+
+# 交换机配置 (名称≤14字符)
+SWITCHES = {
+    'cs1': {'type': 'core', 'vlans': list(VLAN_CONFIG.keys())},
+    'as1': {'type': 'agg', 'vlans': ['office', 'lab', 'library', 'academic', 'hr', 'finance', 'logistics']},
+    'as2': {'type': 'agg', 'vlans': ['dormA', 'dormB', 'dormC', 'canteen', 'wifiOfc', 'wifiGst']},
+    'as3': {'type': 'agg', 'vlans': ['server', 'dmz', 'mgmt']},
+}
+
+# 接入交换机配置
+ACCESS_SW = {
+    'sw1': {'vlan': 'office', 'agg': 'as1'},
+    'sw2': {'vlan': 'lab', 'agg': 'as1'},
+    'sw3': {'vlan': 'library', 'agg': 'as1'},
+    'sw4': {'vlan': 'academic', 'agg': 'as1'},
+    'sw5': {'vlan': 'hr', 'agg': 'as1', 'secure': True},
+    'sw6': {'vlan': 'finance', 'agg': 'as1', 'secure': True},
+    'sw7': {'vlan': 'logistics', 'agg': 'as1'},
+    'sw8': {'vlan': 'dormA', 'agg': 'as2'},
+    'sw9': {'vlan': 'dormB', 'agg': 'as2'},
+    'sw10': {'vlan': 'dormC', 'agg': 'as2'},
+    'sw11': {'vlan': 'canteen', 'agg': 'as2'},
+    'sw12': {'vlan': 'wifiOfc', 'agg': 'as2'},
+    'sw13': {'vlan': 'wifiGst', 'agg': 'as2'},
+    'sw14': {'vlan': 'server', 'agg': 'as3'},
+    'sw15': {'vlan': 'dmz', 'agg': 'as3'},
+}
+
+# 主机配置
+HOSTS = []
+base = 2
+
+# 办公楼
+for i in range(1, 4):
+    HOSTS.append({'name': f'ofc{i}', 'ip': f'10.0.20.{base+i}', 'vlan': 20, 'gw': '10.0.20.1'})
+# 教学楼
+for i in range(1, 4):
+    HOSTS.append({'name': f'acd{i}', 'ip': f'10.0.40.{base+i}', 'vlan': 40, 'gw': '10.0.40.1'})
+# 宿舍A
+for i in range(1, 4):
+    HOSTS.append({'name': f'dA{i}', 'ip': f'10.0.10.{base+i}', 'vlan': 10, 'gw': '10.0.10.1'})
+# 宿舍B
+for i in range(1, 4):
+    HOSTS.append({'name': f'dB{i}', 'ip': f'10.0.11.{base+i}', 'vlan': 11, 'gw': '10.0.11.1'})
+# 人事处
+for i in range(1, 3):
+    HOSTS.append({'name': f'hr{i}', 'ip': f'10.0.50.{base+i}', 'vlan': 50, 'gw': '10.0.50.1'})
+# 财务处
+for i in range(1, 3):
+    HOSTS.append({'name': f'fin{i}', 'ip': f'10.0.60.{base+i}', 'vlan': 60, 'gw': '10.0.60.1'})
+# 访客
+for i in range(1, 3):
+    HOSTS.append({'name': f'gst{i}', 'ip': f'10.0.90.{base+i}', 'vlan': 90, 'gw': '10.0.90.1'})
+# 服务器
+SRV_HOSTS = [
+    {'name': 'web', 'ip': '10.0.100.2/24', 'vlan': 100},
+    {'name': 'ftp', 'ip': '10.0.100.3/24', 'vlan': 100},
+    {'name': 'dns', 'ip': '10.0.100.4/24', 'vlan': 100},
+]
+
+
+class CampusTopo(Topo):
+    def __init__(self):
+        super(CampusTopo, self).__init__()
+
+        info("=== 构建校园网络拓扑 ===\n")
+
+        # 创建核心/汇聚交换机
+        info("创建核心/汇聚交换机...\n")
+        core_sw = self.addSwitch('cs1', cls=OVSKernelSwitch, protocols='OpenFlow13')
+        as1 = self.addSwitch('as1', cls=OVSKernelSwitch, protocols='OpenFlow13')
+        as2 = self.addSwitch('as2', cls=OVSKernelSwitch, protocols='OpenFlow13')
+        as3 = self.addSwitch('as3', cls=OVSKernelSwitch, protocols='OpenFlow13')
+
+        # 创建接入交换机
+        info("创建接入交换机...\n")
+        access_sws = {}
+        for sw_name, sw_config in ACCESS_SW.items():
+            s = self.addSwitch(sw_name, cls=OVSKernelSwitch, protocols='OpenFlow13')
+            access_sws[sw_name] = s
+            vlan_name = sw_config['vlan']
+            info(f"  {sw_name} -> VLAN {VLAN_CONFIG[vlan_name]['id']} ({vlan_name})\n")
+
+        # 创建主机
+        info("创建主机...\n")
+        host_nodes = {}
+        for h in HOSTS:
+            node = self.addHost(h['name'], ip=h['ip'], defaultRoute=f"via {h['gw']}")
+            host_nodes[h['name']] = node
+            info(f"  {h['name']} -> {h['ip']}\n")
+
+        # 创建服务器
+        info("创建服务器...\n")
+        srv_nodes = {}
+        for s in SRV_HOSTS:
+            node = self.addHost(s['name'], ip=s['ip'])
+            srv_nodes[s['name']] = node
+            info(f"  {s['name']} -> {s['ip']}\n")
+
+        # 创建链路 - 核心到汇聚
+        info("创建链路 (核心-汇聚)...\n")
+        self.addLink(core_sw, as1)
+        self.addLink(core_sw, as2)
+        self.addLink(core_sw, as3)
+
+        # 创建链路 - 汇聚到接入
+        info("创建链路 (汇聚-接入)...\n")
+        for sw_name, sw_config in ACCESS_SW.items():
+            agg_sw = sw_config['agg']
+            if agg_sw == 'as1':
+                self.addLink(as1, access_sws[sw_name])
+            elif agg_sw == 'as2':
+                self.addLink(as2, access_sws[sw_name])
+            elif agg_sw == 'as3':
+                self.addLink(as3, access_sws[sw_name])
+            info(f"  {agg_sw} <-> {sw_name}\n")
+
+        # 创建链路 - 主机到接入交换机
+        info("创建链路 (主机-接入)...\n")
+        vlan_to_sw = {}
+        for sw_name, sw_config in ACCESS_SW.items():
+            vlan_to_sw[sw_config['vlan']] = sw_name
+
+        for h in HOSTS:
+            vlan_name = None
+            for vn, vc in VLAN_CONFIG.items():
+                if vc['id'] == h['vlan']:
+                    vlan_name = vn
+                    break
+            if vlan_name and vlan_name in vlan_to_sw:
+                sw_name = vlan_to_sw[vlan_name]
+                self.addLink(host_nodes[h['name']], access_sws[sw_name])
+
+        # 创建链路 - 服务器到接入交换机
+        info("创建链路 (服务器-接入)...\n")
+        for s in SRV_HOSTS:
+            vlan_name = None
+            for vn, vc in VLAN_CONFIG.items():
+                if vc['id'] == s['vlan']:
+                    vlan_name = vn
+                    break
+            if vlan_name and vlan_name in vlan_to_sw:
+                sw_name = vlan_to_sw[vlan_name]
+                self.addLink(srv_nodes[s['name']], access_sws[sw_name])
+
+        info("\n=== 拓扑构建完成 ===\n")
+
+
+class CampusNetwork:
+    def __init__(self):
+        self.net = None
+
+    def build(self):
+        info("="*60 + "\n")
+        info("  校园网络构建系统 v2.0 (WSL兼容版)")
+        info("="*60 + "\n\n")
+
+        topo = CampusTopo()
+
+        info(">> 启动网络...\n")
+        self.net = Mininet(
+            topo=topo,
+            switch=OVSKernelSwitch,
+            controller=None  # 无控制器模式
+        )
+
+        info(">> 启动Mininet...\n")
+        self.net.start()
+
+        # 配置交换机为独立模式
+        info(">> 配置交换机为独立模式...\n")
+        for sw in self.net.switches:
+            sw.cmd('ovs-vsctl set-fail-mode', sw, 'standalone')
+            sw.cmd('ip link set', sw, 'up')
+
+        # 配置接入端口VLAN
+        info(">> 配置接入端口VLAN...\n")
+        self._setup_access_ports()
+
+        info(">> 配置VLAN和路由...\n")
+        self._setup_routing()
+
+        info(">> 配置ACL...\n")
+        self._setup_acl()
+
+        info("\n" + "="*60 + "\n")
+        info("  校园网络构建完成!")
+        info("="*60 + "\n")
+
+        return self.net
+
+    def _setup_routing(self):
+        """配置VLAN间路由"""
+        cs1 = self.net.get('cs1')
+
+        # 为每个VLAN创建接口
+        for vlan_name, config in VLAN_CONFIG.items():
+            vlan_id = config['id']
+            gw = config['gateway']
+
+            cmd = f'ovs-vsctl add-port cs1 vlan{vlan_id} tag={vlan_id} -- set interface vlan{vlan_id} type=internal'
+            cs1.cmd(cmd)
+
+            cmd = f'ip addr add {gw}/24 dev vlan{vlan_id}'
+            cs1.cmd(cmd)
+
+            cmd = f'ip link set vlan{vlan_id} up'
+            cs1.cmd(cmd)
+
+            info(f"  VLAN {vlan_id} ({vlan_name}): {gw}\n")
+
+        cs1.cmd('sysctl -w net.ipv4.ip_forward=1')
+        info("\n  IP转发已启用\n")
+
+    def _setup_access_ports(self):
+        """配置接入端口的VLAN标签"""
+        for sw_name, sw_config in ACCESS_SW.items():
+            vlan_name = sw_config['vlan']
+            vlan_id = VLAN_CONFIG[vlan_name]['id']
+
+            # 获取该交换机上的主机端口
+            for h in HOSTS:
+                if h['vlan'] == vlan_id:
+                    host_name = h['name']
+                    # 获取主机的接口
+                    host = self.net.get(host_name)
+                    # 获取交换机上连接该主机的端口
+                    # 端口名称格式: sw_name-ethN
+                    for intf in host.intfList():
+                        if intf.link:
+                            # 找到连接主机的端口
+                            sw_intf = intf.link.intf1 if intf.link.intf2.node.id == host_name else intf.link.intf2
+                            if sw_intf.node.id == sw_name:
+                                port_name = sw_intf.name
+                                # 配置为access端口
+                                cmd = f'ovs-vsctl set port {port_name} tag={vlan_id}'
+                                sw_intf.node.cmd(cmd)
+                                info(f"  {port_name}: VLAN {vlan_id}\n")
+
+    def _setup_acl(self):
+        """配置访问控制"""
+        cs1 = self.net.get('cs1')
+
+        # 规则: 拒绝学生访问人事处/财务处
+        rules = [
+            ('100', '10.0.10.0/24', '10.0.50.0/24', 'drop'),
+            ('101', '10.0.11.0/24', '10.0.50.0/24', 'drop'),
+            ('102', '10.0.10.0/24', '10.0.60.0/24', 'drop'),
+            ('103', '10.0.11.0/24', '10.0.60.0/24', 'drop'),
+            ('104', '10.0.90.0/24', '10.0.0.0/8', 'drop'),
+            ('200', '0.0.0.0/0', '0.0.0.0/0', 'normal'),
+        ]
+
+        for priority, src, dst, action in rules:
+            cmd = f'ovs-ofctl add-flow cs1 "priority={priority},ip,src={src},dst={dst},actions={action}"'
+            cs1.cmd(cmd)
+            info(f"  ACL: {src} -> {dst} [{action}]\n")
+
+    def run_cli(self):
+        info("\n>> 启动CLI...\n")
+        info("常用命令:\n")
+        info("  nodes              - 查看节点\n")
+        info("  net                - 查看网络\n")
+        info("  dA1 ping ofc1     - 测试连通性\n")
+        info("  dA1 ping hr1      - 测试ACL(应失败)\n")
+        info("  exit               - 退出\n\n")
+        CLI(self.net)
+
+    def stop(self):
+        if self.net:
+            self.net.stop()
+
+
+def signal_handler(sig, frame):
+    print("\n正在停止网络...")
+    if net:
+        net.stop()
+    print("网络已停止")
+    sys.exit(0)
+
+
+net = None
+
+def main():
+    global net
+    setLogLevel('info')
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    campus = CampusNetwork()
+    try:
+        net = campus.build()
+        campus.run_cli()
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        if net:
+            campus.stop()
+
+
+if __name__ == '__main__':
+    main()
