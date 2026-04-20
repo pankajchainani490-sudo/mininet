@@ -230,70 +230,90 @@ class CampusNetwork:
         return self.net
 
     def _setup_access_ports(self):
-        """配置接入端口的VLAN标签"""
-        for sw_name, sw_config in ACCESS_SW.items():
-            vlan_name = sw_config['vlan']
-            vlan_id = VLAN_CONFIG[vlan_name]['id']
+        """配置接入端口VLAN + 明确配置所有trunk端口允许所有VLAN"""
+        all_vlans = ','.join(str(v['id']) for v in VLAN_CONFIG.values())
 
-            for h in HOSTS:
-                if h['vlan'] == vlan_id:
-                    host_name = h['name']
-                    host = self.net.get(host_name)
-                    for intf in host.intfList():
-                        if intf.link:
-                            sw_intf = intf.link.intf1 if intf.link.intf2.node.name == host_name else intf.link.intf2
-                            if sw_intf.node.name == sw_name:
-                                port_name = sw_intf.name
-                                cmd = f'ovs-vsctl set port {port_name} tag={vlan_id}'
-                                sw_intf.node.cmd(cmd)
-                                info(f"  {port_name}: VLAN {vlan_id}\n")
+        for sw in self.net.switches:
+            sw_name = sw.name
+            for intf in sw.intfList():
+                if not intf.link:
+                    continue
+                port_name = intf.name
+                # 跳过回路端口
+                if port_name == 'lo':
+                    continue
+                # 判断是主机端口还是交换机间端口
+                intf1_node = intf.link.intf1.node.name if intf.link.intf1 else None
+                intf2_node = intf.link.intf2.node.name if intf.link.intf2 else None
+
+                is_host_port = (intf1_node in [h['name'] for h in HOSTS] or
+                                intf2_node in [h['name'] for h in HOSTS] or
+                                intf1_node in [s['name'] for s in SRV_HOSTS] or
+                                intf2_node in [s['name'] for s in SRV_HOSTS])
+
+                if is_host_port:
+                    # 接入端口：配置VLAN tag
+                    for h in HOSTS:
+                        if intf1_node == h['name'] or intf2_node == h['name']:
+                            vlan_id = h['vlan']
+                            sw.cmd(f'ovs-vsctl set port {port_name} tag={vlan_id}')
+                            info(f"  {port_name}: access VLAN {vlan_id}\n")
+                            break
+                else:
+                    # 交换机间trunk端口：明确允许所有VLAN
+                    sw.cmd(f'ovs-vsctl set port {port_name} trunks={all_vlans}')
+                    info(f"  {port_name}: trunk allowed={all_vlans}\n")
 
     def _setup_router(self):
-        """配置vrouter节点：每个VLAN一个veth pair，vrouter作为三层网关
+        """配置vrouter节点：单一trunk连接 + VLAN sub-interfaces实现三层路由
 
-        关键设计：vrouter是一个Mininet Node（在root namespace），
-        veth pair在root namespace创建，cs1-vlan{N}端加入OVS bridge，
-        vrouter-vlan{N}端由vrouter节点通过shell配置IP。
+        架构：
+        - cs1 和 vrouter 之间用单一 veth pair (vr0 <-> cs1-vr0)
+        - cs1 端配置为 trunk port，允许所有 VLAN
+        - vrouter 端创建 VLAN sub-interfaces (vr0.10, vr0.20 等)，
+          每个 sub-interface 配置对应 VLAN 的网关 IP
+        - vrouter 通过 kernel routing table 做 VLAN 间路由
         """
         import os
 
-        # 清理旧接口（幂等）
-        for vlan_name, config in VLAN_CONFIG.items():
-            vlan_id = config['id']
-            os.system(f'ip link del cs1-vlan{vlan_id} 2>/dev/null')
-            os.system(f'ip link del vrouter-vlan{vlan_id} 2>/dev/null')
-
-        # 使用MininetNode（不创建独立网络命名空间），保持在root namespace
-        info("  创建vrouter节点...\n")
-        vrouter = self.net.addHost('vrouter', ip='0.0.0.0')
+        info("  创建 vrouter 节点...\n")
+        vrouter = self.net.addHost('vrouter')
         self.vrouter = vrouter
 
-        # 为每个VLAN创建veth pair（在root namespace创建）
-        info("  创建veth pair（root namespace）:\n")
+        # 清理旧接口
+        os.system('ip link del cs1-vr0 2>/dev/null')
+        os.system('ip link del vrouter-vr0 2>/dev/null')
+
+        # 创建单一 veth pair: vrouter-vr0 <-> cs1-vr0
+        os.system('ip link add vrouter-vr0 type veth peer name cs1-vr0')
+
+        # vrouter 端：parent interface 上不配置 IP，保持 up
+        vrouter.cmd('ip link set vrouter-vr0 up')
+
+        # 在 vrouter 上为每个 VLAN 创建 sub-interface 并配置网关 IP
+        info("  配置 VLAN sub-interfaces (vrouter):\n")
         for vlan_name, config in VLAN_CONFIG.items():
             vlan_id = config['id']
             gw = config['gateway']
+            sub_intf = f'vrouter-vr0.{vlan_id}'
 
-            rv_intf = f'vrouter-vlan{vlan_id}'
-            cs_intf = f'cs1-vlan{vlan_id}'
+            # 创建 VLAN sub-interface
+            vrouter.cmd(f'ip link add link vrouter-vr0 name {sub_intf} type vlan id {vlan_id}')
+            vrouter.cmd(f'ip addr add {gw}/24 dev {sub_intf}')
+            vrouter.cmd(f'ip link set {sub_intf} up')
+            info(f"    {sub_intf} = {gw}\n")
 
-            # 在root namespace创建veth pair
-            os.system(f'ip link add {rv_intf} type veth peer name {cs_intf}')
+        # cs1 端：添加为 trunk port，允许所有 VLAN
+        cs1 = self.net.get('cs1')
+        all_vlans = ','.join(str(v['id']) for v in VLAN_CONFIG.values())
+        cs1.cmd(f'ovs-vsctl add-port cs1 cs1-vr0')
+        cs1.cmd(f'ovs-vsctl set port cs1-vr0 trunks={all_vlans}')
+        cs1.cmd('ip link set cs1-vr0 up')
+        info(f"  cs1-vr0: trunk vlans={all_vlans}\n")
 
-            # vrouter端：配置IP作为网关
-            vrouter.cmd(f'ip addr add {gw}/24 dev {rv_intf}')
-            vrouter.cmd(f'ip link set {rv_intf} up')
-
-            # cs1端：OVS access port，带VLAN tag
-            cs1 = self.net.get('cs1')
-            cs1.cmd(f'ovs-vsctl add-port cs1 {cs_intf} tag={vlan_id}')
-            cs1.cmd(f'ip link set {cs_intf} up')
-
-            info(f"    VLAN {vlan_id} ({vlan_name}): {gw}\n")
-
-        # 启用IP转发（在root namespace执行）
-        os.system('sysctl -w net.ipv4.ip_forward=1')
-        info("  IP转发已启用（root namespace）\n")
+        # 启用 IP 转发
+        vrouter.cmd('sysctl -w net.ipv4.ip_forward=1')
+        info("  IP转发已启用 (vrouter)\n")
 
     def _setup_acl(self):
         """配置访问控制"""
