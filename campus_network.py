@@ -253,85 +253,71 @@ class CampusNetwork:
 
                 if is_host_port:
                     # 接入端口：配置VLAN tag
+                    vlan_id = None
+                    host_name = None
                     for h in HOSTS:
                         if intf1_node == h['name'] or intf2_node == h['name']:
                             vlan_id = h['vlan']
-                            sw.cmd(f'ovs-vsctl set port {port_name} tag={vlan_id}')
-                            info(f"  {port_name}: access VLAN {vlan_id}\n")
+                            host_name = h['name']
                             break
+                    if vlan_id is None:
+                        for s in SRV_HOSTS:
+                            if intf1_node == s['name'] or intf2_node == s['name']:
+                                vlan_id = s['vlan']
+                                host_name = s['name']
+                                break
+                    if vlan_id is not None:
+                        sw.cmd(f'ovs-vsctl set port {port_name} tag={vlan_id}')
+                        info(f"  {port_name}: access VLAN {vlan_id}\n")
                 else:
                     # 交换机间trunk端口：明确允许所有VLAN
                     sw.cmd(f'ovs-vsctl set port {port_name} trunks={all_vlans}')
                     info(f"  {port_name}: trunk allowed={all_vlans}\n")
 
     def _setup_router(self):
-        """配置vrouter节点：单一trunk连接 + VLAN sub-interfaces实现三层路由
-
-        关键修复：vrouter.cmd() 命令在 vrouter 的独立网络 namespace 里执行，
-        而 os.system() 在 root namespace 执行。通过 ip netns exec + python 脚本
-        把所有命令注入正确的 namespace。
-        """
+        """配置vrouter：所有网络配置在 root namespace 通过 subprocess 执行"""
         import subprocess
 
-        info("  创建 vrouter 节点...\n")
-        vrouter = self.net.addHost('vrouter')
-        self.vrouter = vrouter
+        info("  配置 vrouter 网络（root namespace）...\n")
 
-        # 获取 vrouter 的 PID（用于 ip netns exec）
-        vrouter_pid = vrouter.cmd('echo $!').strip()
-
-        # 写一个 python 脚本，在 vrouter 的 namespace 里执行所有配置
         all_vlans = ','.join(str(v['id']) for v in VLAN_CONFIG.values())
-        gw_list = '\n    '.join(
-            f'("{vlan_name}", {config["id"]}, "{config["gateway"]}")'
-            for vlan_name, config in VLAN_CONFIG.items()
-        )
 
-        setup_script = f'''
-import subprocess
-import os
+        # 清理旧接口
+        def run(cmd):
+            subprocess.run(cmd, shell=True)
 
-def run(cmd):
-    print(f"  [vrouter namespace] {{cmd}}")
-    subprocess.run(cmd, shell=True)
+        run('ip link del cs1-vr0 2>/dev/null; ip link del vrouter-vr0 2>/dev/null; true')
+        for vid in [1, 10, 11, 12, 13, 20, 21, 30, 40, 50, 60, 70, 80, 90, 100, 110]:
+            run(f'ip link del vrouter-vr0.{vid} 2>/dev/null; true')
 
-# 清理旧接口
-run(f"ip link del cs1-vr0 2>/dev/null; ip link del vrouter-vr0 2>/dev/null; true")
+        # 创建 veth pair（两端都在 root namespace）
+        run('ip link add vrouter-vr0 type veth peer name cs1-vr0')
+        run('ip link set vrouter-vr0 up')
+        info("  created veth pair (root ns)\n")
 
-# 创建 veth pair（在 vrouter 的 namespace 里）
-run("ip link add vrouter-vr0 type veth peer name cs1-vr0")
+        # 在 vrouter-vr0 上创建 VLAN sub-interfaces 并配置网关 IP
+        info("  配置 VLAN sub-interfaces:\n")
+        for vlan_name, config in VLAN_CONFIG.items():
+            vid = config['id']
+            gw = config['gateway']
+            run(f'ip link add link vrouter-vr0 name vrouter-vr0.{vid} type vlan id {vid}')
+            run(f'ip addr add {gw}/24 dev vrouter-vr0.{vid}')
+            run(f'ip link set vrouter-vr0.{vid} up')
+            info(f"    vlan{vid} ({vlan_name}): {gw}\n")
 
-# vrouter-vr0: 不配置 IP，只 up
-run("ip link set vrouter-vr0 up")
+        # 启用 IP 转发
+        run('sysctl -w net.ipv4.ip_forward=1')
+        info("  IP forwarding enabled\n")
 
-# 创建 VLAN sub-interfaces 并配置网关 IP
-vlans = [
-    {gw_list}
-]
-for vlan_name, vlan_id, gw in vlans:
-    sub_intf = f"vrouter-vr0.{{vlan_id}}"
-    run(f"ip link add link vrouter-vr0 name {{sub_intf}} type vlan id {{vlan_id}}")
-    run(f"ip addr add {{gw}}/24 dev {{sub_intf}}")
-    run(f"ip link set {{sub_intf}} up")
-    print(f"    VLAN {{vlan_id}} ({{vlan_name}}): {{gw}}")
-
-# 启用 IP 转发
-run("sysctl -w net.ipv4.ip_forward=1")
-print("  IP转发已启用")
-'''
-
-        # 在 vrouter 的 namespace 里执行 python 配置脚本
-        info("  在 vrouter namespace 中配置网络...\n")
-        vrouter.cmd(f'cat > /tmp/vrouter_setup.py << \'PYEOF\'\n{setup_script}\nPYEOF')
-        vrouter.cmd(f'python3 /tmp/vrouter_setup.py')
-
-        # cs1 端：清理旧接口，添加 trunk port
-        cs1 = self.net.get('cs1')
-        cs1.cmd('ip link del cs1-vr0 2>/dev/null; true')
-        cs1.cmd(f'ovs-vsctl add-port cs1 cs1-vr0')
-        cs1.cmd(f'ovs-vsctl set port cs1-vr0 trunks={all_vlans}')
-        cs1.cmd('ip link set cs1-vr0 up')
+        # cs1 端：添加 trunk port（用 os.system 确保在 root ns）
+        import os
+        os.system('ip link set cs1-vr0 up')
+        os.system(f'ovs-vsctl add-port cs1 cs1-vr0')
+        os.system(f'ovs-vsctl set port cs1-vr0 trunks={all_vlans}')
         info(f"  cs1-vr0: trunk vlans={all_vlans}\n")
+
+        # 保存 vrouter 引用（用于后续 CLI 命令）
+        self.vrouter = None  # 不再需要 vrouter 节点，所有命令在 root 执行
 
     def _setup_acl(self):
         """配置访问控制"""
@@ -354,7 +340,8 @@ print("  IP转发已启用")
         ]
 
         for priority, src, dst, action in rules:
-            cmd = f'ovs-ofctl add-flow cs1 "priority={priority},ip,src={src},dst={dst},actions={action}"'
+            # -O OpenFlow13: 强制使用 OF 1.3 协议（cs1 使用 OpenFlow13）
+            cmd = f'ovs-ofctl -O OpenFlow13 add-flow cs1 "priority={priority},ip,src={src},dst={dst},actions={action}"'
             cs1.cmd(cmd)
             info(f"  ACL: {src} -> {dst} [{action}]\n")
 
