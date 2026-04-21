@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>校园网络模拟器 v2.3</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen text-gray-800">
+    <!-- Header -->
+    <header class="bg-white shadow-md border-b border-gray-200 sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center shadow-md">
+                    <i class="fas fa-network-wired text-white"></i>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold text-gray-800">校园网络模拟器</h1>
+                    <p class="text-xs text-gray-500">Campus Network Simulator v2.3</p>
+                </div>
+            </div>
+            <div class="flex items-center gap-4">
+                <div id="networkStatus" class="flex items-center gap-2 px-4 py-2 rounded-full bg-gray-100 border border-gray-200">
+                    <span class="w-2 h-2 rounded-full bg-red-500"></span>
+                    <span class="text-sm text-gray-600">离线</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-6">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <!-- Left Panel -->
+            <div class="lg:col-span-3 space-y-4">
+                <!-- Network Structure -->
+                <div class="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden">
+                    <div class="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+                        <span class="font-semibold flex items-center gap-2">
+                            <i class="fas fa-sitemap text-blue-600"></i> 网络结构
+                        </span>
+                        <button onclick="refreshTopology()" class="p-2 hover:bg-gray-100 rounded-lg transition">
+                            <i class="fas fa-sync-alt text-gray-500"></i>
+                        </button>
+                    </div>
+                    <div id="treeView" class="p-4 max-h-80 overflow-y-auto"></div>
+                </div>
+
+                <!-- Control Panel -->
+                <div class="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden">
+                    <div class="px-4 py-3 border-b border-gray-200">
+                        <span class="font-semibold flex items-center gap-2">
+                            <i class="fas fa-terminal text-green-600"></i> 控制面板
+                        </span>
+                    </div>
+                    <div class="p-4 space-y-4">
+                        <div>
+                            <label class="block text-sm text-gray-500 mb-2">连通性测试</label>
+                            <select id="pingSrc" class="w-full bg-white border border-gray-300 rounded-xl px-4 py-2.5 text-gray-700 focus:border-blue-500 focus:outline-none">
+                                <option value="">选择源主机</option>
+                            </select>
+                        </div>
+                        <div>
+                            <select id="pingDst" class="w-full bg-white border border-gray-300 rounded-xl px-4 py-2.5 text-gray-700 focus:border-blue-500 focus:outline-none">
+                                <option value="">选择目标主机</option>
+                            </select>
+                        </div>
+                        <button onclick="testPing()" class="w-full bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded-xl font-semibold transition flex items-center justify-center gap-2 shadow-md">
+                            <i class="fas fa-broadcast"></i> 测试 Ping
+                        </button>
+                        <div class="grid grid-cols-2 gap-3">
+                            <button onclick="showACL()" class="bg-amber-500 hover:bg-amber-400 text-white py-2 rounded-xl transition flex items-center justify-center gap-2 text-sm shadow-md">
+                                <i class="fas fa-shield-alt"></i> ACL
+                            </button>
+                            <button onclick="clearStatus()" class="bg-gray-500 hover:bg-gray-400 text-white py-2 rounded-xl transition flex items-center justify-center gap-2 text-sm shadow-md">
+                                <i class="fas fa-eraser"></i> 清除
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ACL Rules -->
+                <div class="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden">
+                    <div class="px-4 py-3 border-b border-gray-200">
+                        <span class="font-semibold flex items-center gap-2">
+                            <i class="fas fa-fire text-red-500"></i> ACL 防火墙规则
+                        </span>
+                    </div>
+                    <ul id="aclRules" class="p-3 space-y-2 max-h-64 overflow-y-auto"></ul>
+                </div>
+            </div>
+
+            <!-- Right Panel -->
+            <div class="lg:col-span-9 space-y-4">
+                <!-- Topology -->
+                <div class="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden">
+                    <div class="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+                        <span class="font-semibold flex items-center gap-2">
+                            <i class="fas fa-project-diagram text-blue-600"></i> 网络拓扑
+                        </span>
+                        <div class="flex items-center gap-4 text-xs text-gray-600">
+                            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-blue-500"></span> 核心</span>
+                            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-purple-500"></span> 汇聚</span>
+                            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-gray-500"></span> 接入</span>
+                            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-green-500"></span> 主机</span>
+                            <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-orange-500"></span> 服务器</span>
+                        </div>
+                    </div>
+                    <div class="p-4" id="topologyContainer">
+                        <svg id="topologySvg" class="w-full" style="height: 550px;"></svg>
+                    </div>
+                </div>
+
+                <!-- Results -->
+                <div class="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden">
+                    <div class="px-4 py-3 border-b border-gray-200">
+                        <span class="font-semibold flex items-center gap-2">
+                            <i class="fas fa-clipboard-list text-blue-600"></i> 测试结果
+                        </span>
+                    </div>
+                    <div class="p-4">
+                        <pre id="testResults" class="font-mono text-sm bg-gray-800 text-green-400 rounded-xl p-4 h-48 overflow-auto"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="js/topology_data.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/treeview.js"></script>
+    <script src="js/topology.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            await loadTopology();
+            await loadACL();
+        });
+
+        async function loadTopology() {
+            try {
+                const data = await api.getTopology();
+                renderTreeView(data);
+                renderTopology(data);
+                document.getElementById('networkStatus').innerHTML = '<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span><span class="text-sm text-green-600">在线</span>';
+                populateHostSelect(data);
+            } catch (error) {
+                document.getElementById('networkStatus').innerHTML = '<span class="w-2 h-2 rounded-full bg-red-500"></span><span class="text-sm text-red-600">离线</span>';
+            }
+        }
+
+        async function refreshTopology() {
+            await loadTopology();
+            addResult('[刷新] 拓扑已刷新', 'info');
+        }
+
+        function populateHostSelect(data) {
+            const hosts = data.nodes.filter(n => n.type === 'host' || n.type === 'server');
+            const srcSelect = document.getElementById('pingSrc');
+            const dstSelect = document.getElementById('pingDst');
+            [srcSelect, dstSelect].forEach(select => {
+                select.innerHTML = '<option value="">选择主机</option>';
+                hosts.forEach(h => {
+                    const cnName = window.NODE_NAMES_CN ? window.NODE_NAMES_CN[h.id] || h.id : h.id;
+                    select.innerHTML += `<option value="${h.id}">${cnName}</option>`;
+                });
+            });
+        }
+
+        async function testPing() {
+            const src = document.getElementById('pingSrc').value;
+            const dst = document.getElementById('pingDst').value;
+            if (!src || !dst) { alert('请选择源和目标主机'); return; }
+            const srcName = window.NODE_NAMES_CN ? window.NODE_NAMES_CN[src] || src : src;
+            const dstName = window.NODE_NAMES_CN ? window.NODE_NAMES_CN[dst] || dst : dst;
+            addResult(`[测试] ${srcName} -> ${dstName}`, 'info');
+            try {
+                const result = await api.ping(src, dst);
+                if (result.success) {
+                    addResult(`[成功] ${srcName} -> ${dstName} (RTT: ${result.rtt?.avg || '?'}ms)`, 'success');
+                    highlightPathOnTopology(src, dst, true);
+                } else {
+                    addResult(`[阻断] ${srcName} -> ${dstName}: ACL blocked`, 'error');
+                    highlightPathOnTopology(src, dst, false);
+                }
+            } catch (error) {
+                addResult(`[错误] ${error.message}`, 'error');
+            }
+        }
+
+        async function showACL() {
+            if (typeof highlightACLOnTopology === 'function') highlightACLOnTopology();
+            addResult('[ACL] 规则已高亮', 'info');
+        }
+
+        function clearStatus() {
+            if (typeof clearTopology === 'function') clearTopology();
+            addResult('[清除] 状态已清除', 'info');
+        }
+
+        function addResult(message, type) {
+            const results = document.getElementById('testResults');
+            const time = new Date().toLocaleTimeString();
+            const colors = { success: 'text-green-400', error: 'text-red-400', info: 'text-blue-400' };
+            results.innerHTML += `<div class="${colors[type] || ''}">[${time}] ${message}</div>`;
+            results.scrollTop = results.scrollHeight;
+        }
+
+        function loadACL() {
+            const aclList = document.getElementById('aclRules');
+            const rules = [
+                { src: '宿舍A', dst: '人事处', action: 'BLOCK', blocked: true },
+                { src: '宿舍B', dst: '人事处', action: 'BLOCK', blocked: true },
+                { src: '宿舍A', dst: '财务处', action: 'BLOCK', blocked: true },
+                { src: '宿舍B', dst: '财务处', action: 'BLOCK', blocked: true },
+                { src: '访客', dst: '内网', action: 'BLOCK', blocked: true },
+                { src: '宿舍', dst: '服务器', action: 'ALLOW', blocked: false },
+            ];
+            aclList.innerHTML = rules.map(rule => `
+                <li class="flex items-center justify-between p-3 rounded-xl ${rule.blocked ? 'bg-red-50 border border-red-200' : 'bg-green-50 border border-green-200'}">
+                    <div class="flex items-center gap-2">
+                        <span class="px-2 py-1 rounded-lg text-xs font-medium ${rule.blocked ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}">${rule.src}</span>
+                        <i class="fas fa-arrow-right text-gray-400 text-xs"></i>
+                        <span class="px-2 py-1 rounded-lg text-xs font-medium ${rule.blocked ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}">${rule.dst}</span>
+                    </div>
+                    <span class="px-3 py-1 rounded-full text-xs font-bold ${rule.blocked ? 'bg-red-500 text-white' : 'bg-green-500 text-white'}">${rule.action}</span>
+                </li>
+            `).join('');
+        }
+    </script>
+</body>
+</html>
