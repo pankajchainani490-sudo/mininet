@@ -104,16 +104,16 @@ class CampusTopo(Topo):
 
         # 创建核心/汇聚交换机
         info("创建核心/汇聚交换机...\n")
-        core_sw = self.addSwitch('cs1', cls=OVSKernelSwitch, protocols='OpenFlow13')
-        as1 = self.addSwitch('as1', cls=OVSKernelSwitch, protocols='OpenFlow13')
-        as2 = self.addSwitch('as2', cls=OVSKernelSwitch, protocols='OpenFlow13')
-        as3 = self.addSwitch('as3', cls=OVSKernelSwitch, protocols='OpenFlow13')
+        core_sw = self.addSwitch('cs1', cls=OVSKernelSwitch)
+        as1 = self.addSwitch('as1', cls=OVSKernelSwitch)
+        as2 = self.addSwitch('as2', cls=OVSKernelSwitch)
+        as3 = self.addSwitch('as3', cls=OVSKernelSwitch)
 
         # 创建接入交换机
         info("创建接入交换机...\n")
         access_sws = {}
         for sw_name, sw_config in ACCESS_SW.items():
-            s = self.addSwitch(sw_name, cls=OVSKernelSwitch, protocols='OpenFlow13')
+            s = self.addSwitch(sw_name, cls=OVSKernelSwitch)
             access_sws[sw_name] = s
             vlan_name = sw_config['vlan']
             info(f"  {sw_name} -> VLAN {VLAN_CONFIG[vlan_name]['id']} ({vlan_name})\n")
@@ -340,8 +340,7 @@ class CampusNetwork:
         ]
 
         for priority, src, dst, action in rules:
-            # -O OpenFlow13: 强制使用 OF 1.3 协议（cs1 使用 OpenFlow13）
-            cmd = f'ovs-ofctl -O OpenFlow13 add-flow cs1 "priority={priority},ip,src={src},dst={dst},actions={action}"'
+            cmd = f'ovs-ofctl add-flow cs1 "priority={priority},ip,nw_src={src},nw_dst={dst},actions={action}"'
             cs1.cmd(cmd)
             info(f"  ACL: {src} -> {dst} [{action}]\n")
 
